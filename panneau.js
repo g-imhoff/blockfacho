@@ -231,6 +231,32 @@ const CONNEXION_URL = {
   facebook: 'https://www.facebook.com/login/',
   youtube: 'https://accounts.google.com/ServiceLogin?service=youtube',
 };
+const ORIGINES = {
+  x: 'https://x.com/*',
+  instagram: 'https://www.instagram.com/*',
+  tiktok: 'https://www.tiktok.com/*',
+  facebook: 'https://www.facebook.com/*',
+  youtube: 'https://www.youtube.com/*',
+};
+// Cookies posés seulement quand une session est ouverte. Ils ne dépendent ni de
+// la langue ni de la mise en page, contrairement aux marqueurs DOM. chrome.cookies
+// lit aussi les HttpOnly (sessionid, auth_token…).
+const COOKIES_SESSION = {
+  x: ['auth_token'],
+  instagram: ['sessionid'],
+  tiktok: ['sessionid', 'sessionid_ss', 'sid_tt'],
+  facebook: ['c_user'],
+  youtube: ['SID', '__Secure-1PSID', '__Secure-3PSID', 'SAPISID', '__Secure-3PAPISID'],
+};
+
+// Rend le nom du premier cookie de session trouvé, sinon null.
+async function cookieDeSession(p) {
+  for (const name of COOKIES_SESSION[p]) {
+    const c = await chrome.cookies.get({ url: ACCUEIL[p], name });
+    if (c?.value) return name;
+  }
+  return null;
+}
 
 // NOTE : aucune constante de ce fichier n'est visible des fonctions injectées
 // (chrome.scripting ne transporte que la fonction). Chaque détecteur / acteur
@@ -325,7 +351,8 @@ async function detecterTiktok() {
     return null;
   };
   const texte = (el) => ((el.innerText ?? el.textContent) ?? '').trim();
-  const MARQUEURS = '[data-e2e="nav-inbox"], [data-e2e="profile-icon"], [data-e2e="nav-profile"], a[href="/messages/"], a[href="/messages"], a[href="/inbox"]';
+  // Pas de nav-profile : il existe aussi déconnecté (href="/@").
+  const MARQUEURS = '[data-e2e="nav-inbox"], [data-e2e="profile-icon"], a[href="/messages/"], a[href="/messages"], a[href="/inbox"]';
   // SPA : on attend le rendu (bouton login OU marqueurs de session) avant de trancher.
   await attendre(
     () =>
@@ -335,16 +362,19 @@ async function detecterTiktok() {
       (document.body?.textContent?.length ?? 0) > 500,
     15000,
   );
-  // Marqueurs d'abord : sur l'accueil déconnecté, les liens /@ des vidéos du fil
-  // existent aussi — ils ne prouvent rien sans marqueur de session.
-  if (document.querySelector(MARQUEURS)) {
-    let identite = null;
+  // Le JSON de réhydratation contient l'utilisateur connecté (vide si déconnecté).
+  let identite = null;
+  try {
+    const donnees = JSON.parse(document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')?.textContent ?? '{}');
+    const pseudo = donnees?.__DEFAULT_SCOPE__?.['webapp.app-context']?.user?.uniqueId;
+    if (pseudo) identite = '@' + String(pseudo).toLowerCase();
+  } catch { /* identité facultative */ }
+  // Marqueurs ensuite. Sur l'accueil déconnecté, les liens /@ des vidéos du fil
+  // existent aussi : ils ne prouvent rien et ne donnent jamais l'identité.
+  if (identite || document.querySelector(MARQUEURS)) {
     try {
-      // Le lien du bouton profil d'abord (c'est le compte connecté, pas un auteur du fil).
-      const profil = document.querySelector('[data-e2e="nav-profile"]')?.getAttribute('href') ??
-        document.querySelector('a[href^="/@"]')?.getAttribute('href');
-      const m = profil?.match(/^\/@([A-Za-z0-9._]{1,24})/);
-      if (m) identite = '@' + m[1].toLowerCase();
+      const m = document.querySelector('[data-e2e="nav-profile"]')?.getAttribute('href')?.match(/^\/@([A-Za-z0-9._]{1,24})/);
+      if (!identite && m) identite = '@' + m[1].toLowerCase();
     } catch { /* identité facultative */ }
     return { connecte: true, identite };
   }
@@ -378,11 +408,22 @@ async function detecterFacebook() {
   if (document.querySelector('input#email, input[name="email"]') && /log in|se connecter|mot de passe/i.test(corps)) {
     return { connecte: false, identite: null };
   }
+  // CurrentUserInitialData (script de la page) : USER_ID "0" si déconnecté, sinon le nom du compte.
+  let identite = null;
+  let userId = false;
+  try {
+    const source = [...document.scripts].map((s) => s.textContent ?? '').find((t) => t.includes('"CurrentUserInitialData"')) ?? '';
+    const m = source.match(/"CurrentUserInitialData",\[\],\{[^}]*?"USER_ID":"(\d+)"[^}]*?"NAME":"((?:[^"\\]|\\.)*)"/);
+    if (m && m[1] !== '0') {
+      userId = true;
+      identite = JSON.parse(`"${m[2]}"`) || null;
+    }
+  } catch { /* identité facultative */ }
   // Cookie c_user (identifiant numérique, lisible en JS) = preuve de session.
   let sessionCookie = false;
   try { sessionCookie = /(?:^|;\s*)c_user=\d+/.test(document.cookie ?? ''); } catch { /* cookies indisponibles */ }
   const marqueur = document.querySelector(MARQUEURS);
-  if (marqueur || sessionCookie) return { connecte: true, identite: null };
+  if (marqueur || sessionCookie || userId) return { connecte: true, identite };
   return { connecte: false, identite: null };
 }
 
@@ -398,7 +439,8 @@ async function detecterYoutube() {
   };
   const corps = () => document.body?.innerText ?? '';
   const texte = (el) => ((el.innerText ?? el.textContent) ?? '').trim();
-  const AVATAR = '#avatar-btn button, button#avatar-btn, ytd-topbar-menu-button-renderer button';
+  // #avatar-btn seulement : ytd-topbar-menu-button-renderer est aussi le bouton « Paramètres » déconnecté.
+  const AVATAR = '#avatar-btn button, button#avatar-btn';
   // On attend le rendu (avatar OU écran de connexion OU mur consentement) avant de trancher.
   await attendre(
     () =>
@@ -419,11 +461,13 @@ async function detecterYoutube() {
     } catch { /* consentement facultatif */ }
   }
   if ((document.body?.textContent?.length ?? 0) < 50) return { connecte: false, identite: null };
-  if (document.querySelector('a[href*="ServiceLogin"]') && /sign in|se connecter/i.test(corps())) {
+  // ytcfg écrit LOGGED_IN dans un script de la page, quelle que soit la langue.
+  const logue = [...document.scripts].some((s) => (s.textContent ?? '').includes('"LOGGED_IN":true'));
+  if (!logue && document.querySelector('a[href*="ServiceLogin"]') && /sign in|se connecter/i.test(corps())) {
     return { connecte: false, identite: null };
   }
   const avatar = await attendre(() => document.querySelector(AVATAR), 5000);
-  if (!avatar) return { connecte: false, identite: null };
+  if (!avatar) return { connecte: logue, identite: null };
   avatar.click();
   await attendre(() => document.querySelector('ytd-active-account-header-renderer #account-name'), 8000);
   let identite = null;
@@ -544,45 +588,73 @@ async function verifierConnexions() {
     log('Coche au moins une plateforme avant de vérifier.', 'err');
     return;
   }
+  // Appelé avant tout await, pendant le clic : si l'accès à un site a été retiré
+  // (réglage « Accès aux sites »), le navigateur propose de le rendre.
+  const demandeAcces = chrome.permissions.request({ origins: plateformes.map((p) => ORIGINES[p]) }).catch(() => false);
   $('verifier').disabled = true;
   log(`Vérification des sessions : ${plateformes.map((p) => PLATEFORMES[p]).join(', ')}…`, 'gris');
+  await demandeAcces;
   const fenetre = await chrome.windows.create({ url: 'about:blank', focused: false });
   const tabId = fenetre.tabs[0].id;
+  // Le cookie de session fait foi : les repères de page se trompent dans les deux
+  // sens (mise en page, langue, boutons présents déconnecté). La page ne sert
+  // qu'à lire l'identité, et de repli si le navigateur refuse la lecture des cookies.
+  const essayer = async (p) => {
+    await chargerOnglet(tabId, ACCUEIL[p]);
+    let page = null;
+    let erreur = '';
+    try {
+      page = await executer(tabId, DETECTEURS[p], []);
+    } catch (e) {
+      erreur = e?.message ?? String(e);
+    }
+    let cookie = null;
+    let cookiesLisibles = true;
+    try {
+      cookie = await cookieDeSession(p);
+    } catch {
+      cookiesLisibles = false;
+    }
+    const connecte = cookiesLisibles ? !!cookie : !!page?.connecte;
+    return { page, erreur, cookie, cookiesLisibles, connecte };
+  };
   try {
     for (const p of plateformes) {
       try {
-        await chargerOnglet(tabId, ACCUEIL[p]);
-        let r = await executer(tabId, DETECTEURS[p], []);
-        // Un négatif peut venir d'un rendu trop lent : un seul nouvel essai.
-        if (!r?.connecte) {
-          await pause(4000);
-          await chargerOnglet(tabId, ACCUEIL[p]);
-          r = await executer(tabId, DETECTEURS[p], []);
-        }
-        connexions[p] = { connecte: !!r?.connecte, identite: r?.identite ?? null };
-        if (!r?.connecte) {
-          let sonde = '';
-          try {
-            const s = await executer(tabId, sonderPage, []);
-            sonde = ` (page : ${s?.titre ?? '?'} — ${s?.longueur ?? 0} caractères)`;
-          } catch { /* sonde facultative */ }
-          connexions[p].sonde = sonde;
-        }
-        if (p === 'youtube') {
-          const id = r?.identite;
-          if (r?.connecte && id && id.id) {
-            ytActif = id.id;
-            ytDetecte = { ...id };
-            if (!ytComptes.some((c) => c.id === id.id)) {
-              log(`YouTube détecté : ${id.label} (non enregistré — bouton « Ajouter » disponible, ${YT_MAX_COMPTES} max).`, 'gris');
-            }
-          } else if (!r?.connecte) {
-            log(`YouTube : non connecté — connecte-toi puis revérifie.${connexions[p].sonde}`, 'err');
-          }
-        } else if (connexions[p].connecte) {
-          log(`${PLATEFORMES[p]} : connecté${connexions[p].identite ? ` (${connexions[p].identite})` : ''}.`, 'ok');
+        if (!(await chrome.permissions.contains({ origins: [ORIGINES[p]] }))) {
+          connexions[p] = { connecte: false, identite: null };
+          log(`${PLATEFORMES[p]} : le navigateur refuse l'accès de Blockfacho à ce site. Page des extensions → Blockfacho → Détails → Accès aux sites → « Sur tous les sites », puis revérifie.`, 'err');
         } else {
-          log(`${PLATEFORMES[p]} : NON CONNECTÉ — utilise « Se connecter » ci-dessus.${connexions[p].sonde}`, 'err');
+          let r = await essayer(p);
+          // Un négatif peut venir d'une connexion auto encore en cours : un seul nouvel essai.
+          if (!r.connecte) {
+            await pause(4000);
+            r = await essayer(p);
+          }
+          const { connecte } = r;
+          const identite = connecte ? r.page?.identite ?? null : null;
+          connexions[p] = { connecte, identite };
+          if (connecte) {
+            const nom = typeof identite === 'string' ? identite : identite?.label;
+            log(`${PLATEFORMES[p]} : connecté${nom ? ` (${nom})` : ''} [${r.cookie ? `cookie ${r.cookie}` : 'repéré sur la page, cookies illisibles'}].`, 'ok');
+            if (p === 'youtube' && identite?.id) {
+              ytActif = identite.id;
+              ytDetecte = { ...identite };
+              if (!ytComptes.some((c) => c.id === identite.id)) {
+                log(`YouTube détecté : ${identite.label} (non enregistré — bouton « Ajouter » disponible, ${YT_MAX_COMPTES} max).`, 'gris');
+              }
+            }
+          } else {
+            let sonde = '';
+            try {
+              const s = await executer(tabId, sonderPage, []);
+              sonde = ` ; page : ${s?.titre ?? '?'} — ${s?.longueur ?? 0} caractères`;
+            } catch { /* sonde facultative */ }
+            const cause = r.cookiesLisibles ? `aucun cookie ${COOKIES_SESSION[p].join('/')}` : 'cookies illisibles, aucun repère de session';
+            const contradiction = r.cookiesLisibles && r.page?.connecte ? ' ; la page semble pourtant connectée' : '';
+            const panne = r.erreur ? ` ; injection : ${r.erreur}` : '';
+            log(`${PLATEFORMES[p]} : NON CONNECTÉ (${cause}${contradiction}${sonde}${panne}). Utilise « Se connecter » ci-dessus.`, 'err');
+          }
         }
       } catch (e) {
         connexions[p] = { connecte: false, identite: null };
