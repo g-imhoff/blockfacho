@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Blockfacho",
-  "version": "2.8",
+  "version": "2.9",
   "description": "Bloque sur X, Instagram, TikTok, Facebook et YouTube les comptes de l'annuaire blockfacho, depuis tes sessions déjà connectées.",
   "permissions": ["scripting", "storage"],
   "host_permissions": [

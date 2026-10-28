@@ -66,7 +66,7 @@ const PAGES_X = new Set(['home', 'explore', 'search', 'notifications', 'messages
 const handleXDepuisUrl = (url) => url?.match(/^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/(\w{1,15})/i)?.[1] ?? null;
 const handleXValide = (h) => typeof h === 'string' && /^\w{1,15}$/.test(h) && !PAGES_X.has(h.toLowerCase());
 
-const PAGES_IG = new Set(['p', 'reel', 'reels', 'explore', 'direct', 'accounts', 'about', 'embeds']);
+const PAGES_IG = new Set(['p', 'reel', 'reels', 'stories', 'explore', 'direct', 'accounts', 'about', 'embeds', 'tv', 'login', 'signup', 'challenge', 'oauth']);
 const pseudoIGDepuisUrl = (url) => url?.match(/^https?:\/\/(?:www\.)?instagram\.com\/([A-Za-z0-9._]{1,30})/i)?.[1]?.replace(/\/$/, '') ?? null;
 const pseudoIGValide = (h) => typeof h === 'string' && /^[A-Za-z0-9._]{1,30}$/.test(h) && !PAGES_IG.has(h.toLowerCase());
 
@@ -198,7 +198,10 @@ function afficherPlateformes() {
 }
 
 function afficherCategories() {
-  const parCat = Object.groupBy(comptes, (c) => c.category);
+  // Object.groupBy (ES2024, Chrome 117+) avec repli pour les Chromium plus anciens.
+  const parCat = typeof Object.groupBy === 'function'
+    ? Object.groupBy(comptes, (c) => c.category)
+    : comptes.reduce((acc, c) => { (acc[c.category] ??= []).push(c); return acc; }, {});
   $('categories').replaceChildren(
     ...Object.entries(parCat).map(([cat, liste]) => {
       const restants = nonTermines(liste).length;
@@ -261,30 +264,54 @@ async function detecterInstagram() {
     }
     return null;
   };
+  const corps = () => document.body?.innerText ?? '';
+  const brut = () => document.body?.textContent ?? '';
   // SPA : on attend le rendu (formulaire login OU barre de nav) avant de trancher.
+  // textContent plutôt que innerText : insensible à la mise en page (onglet en arrière-plan).
   await attendre(
     () =>
-      (document.body?.innerText?.length ?? 0) > 200 ||
+      brut().length > 200 ||
       document.querySelector('input[name="username"]') ||
-      document.querySelector('nav a[href]'),
+      document.querySelector('nav a[href], div[role="navigation"] a[href]'),
     15000,
   );
-  const corps = document.body?.innerText ?? '';
-  if (document.querySelector('input[name="username"]') && /log in|se connecter/i.test(corps)) {
+  if (document.querySelector('input[name="username"]') && /log in|se connecter/i.test(corps())) {
     return { connecte: false, identite: null };
   }
   // Liste locale : la fonction injectée doit rester autonome (aucune réf externe).
-  const EXCLUS = new Set(['explore', 'reels', 'reel', 'direct', 'accounts', 'about', 'p']);
+  // Tient la même liste que PAGES_IG (chemins non-profil à ne jamais prendre pour un pseudo).
+  const EXCLUS = new Set(['p', 'reel', 'reels', 'stories', 'explore', 'direct', 'accounts', 'about', 'embeds', 'tv', 'login', 'signup', 'challenge', 'oauth']);
+  const extraire = (ancres) => ancres
+    .map((a) => (a.getAttribute('href') ?? '').match(/^\/([A-Za-z0-9._]{1,30})\/$/)?.[1])
+    .find((h) => h && !EXCLUS.has(h.toLowerCase()));
+  // 1. Identité : bouton profil de la barre latérale (vrai <nav>, conteneur ARIA ou <header>).
   let identite = null;
   try {
-    const hrefs = [...document.querySelectorAll('nav a[href]')].map((a) => a.getAttribute('href') ?? '');
-    const pseudo = hrefs.map((h) => (h.match(/^\/([A-Za-z0-9._]{1,30})\/$/) ?? [])[1]).find((h) => h && !EXCLUS.has(h.toLowerCase()));
-    if (pseudo) identite = '@' + pseudo.toLowerCase();
+    const zones = ['nav a[href]', 'div[role="navigation"] a[href]', 'header a[href]'];
+    for (const z of zones) {
+      const ancres = [...document.querySelectorAll(z)];
+      if (!ancres.length) continue;
+      const pseudo = extraire(ancres);
+      if (pseudo) { identite = '@' + pseudo.toLowerCase(); break; }
+    }
   } catch { /* identité facultative */ }
-  // Preuve positive exigée : sans lien profil, on considère non connecté
-  // (le runtime agirInstagram tranchera au moment du blocage).
-  if (!identite) return { connecte: false, identite: null };
-  return { connecte: true, identite };
+  if (identite) return { connecte: true, identite };
+  // 2. Marqueurs de session sans identité : la messagerie et la création
+  // n'existent que connecté (le runtime agirInstagram tranche au blocage).
+  const marqueur =
+    document.querySelector('a[href="/direct/inbox/"], a[href^="/direct/"]') ||
+    [...document.querySelectorAll('a[href]')].find((a) => /^(créer|create)$/i.test(((a.innerText ?? a.textContent) ?? '').trim()));
+  if (marqueur) return { connecte: true, identite: null };
+  // 3. Repli : textes de la barre latérale (Accueil + Recherche/Messages/…).
+  try {
+    const navTxt = [...document.querySelectorAll('nav a, div[role="navigation"] a')]
+      .map((a) => ((a.innerText ?? a.textContent) ?? '').trim().toLowerCase());
+    if (navTxt.some((t) => t === 'accueil' || t === 'home') &&
+        navTxt.some((t) => ['recherche', 'search', 'messages', 'notifications', 'créer', 'create', 'profil', 'profile'].includes(t))) {
+      return { connecte: true, identite: null };
+    }
+  } catch { /* repli facultatif */ }
+  return { connecte: false, identite: null };
 }
 
 async function detecterTiktok() {
@@ -297,24 +324,34 @@ async function detecterTiktok() {
     }
     return null;
   };
+  const texte = (el) => ((el.innerText ?? el.textContent) ?? '').trim();
+  const MARQUEURS = '[data-e2e="nav-inbox"], [data-e2e="profile-icon"], [data-e2e="nav-profile"], a[href="/messages/"], a[href="/messages"], a[href="/inbox"]';
   // SPA : on attend le rendu (bouton login OU marqueurs de session) avant de trancher.
   await attendre(
     () =>
       document.querySelector('[data-e2e="top-login-button"]') ||
-      document.querySelector('[data-e2e="nav-inbox"], [data-e2e="profile-icon"], [data-e2e="nav-profile"]') ||
-      document.querySelector('a[href^="/@"]') ||
-      (document.body?.innerText?.length ?? 0) > 500,
+      [...document.querySelectorAll('a, button')].find((b) => /^(log in|se connecter)$/i.test(texte(b))) ||
+      document.querySelector(MARQUEURS) ||
+      (document.body?.textContent?.length ?? 0) > 500,
     15000,
   );
-  if (document.querySelector('[data-e2e="top-login-button"]')) return { connecte: false, identite: null };
-  let identite = null;
-  try {
-    const m = document.querySelector('a[href^="/@"]')?.getAttribute('href')?.match(/^\/@([A-Za-z0-9._]{1,24})/);
-    if (m) identite = '@' + m[1].toLowerCase();
-  } catch { /* identité facultative */ }
-  if (document.querySelector('[data-e2e="nav-inbox"], [data-e2e="profile-icon"], [data-e2e="nav-profile"]') || identite) {
+  // Marqueurs d'abord : sur l'accueil déconnecté, les liens /@ des vidéos du fil
+  // existent aussi — ils ne prouvent rien sans marqueur de session.
+  if (document.querySelector(MARQUEURS)) {
+    let identite = null;
+    try {
+      // Le lien du bouton profil d'abord (c'est le compte connecté, pas un auteur du fil).
+      const profil = document.querySelector('[data-e2e="nav-profile"]')?.getAttribute('href') ??
+        document.querySelector('a[href^="/@"]')?.getAttribute('href');
+      const m = profil?.match(/^\/@([A-Za-z0-9._]{1,24})/);
+      if (m) identite = '@' + m[1].toLowerCase();
+    } catch { /* identité facultative */ }
     return { connecte: true, identite };
   }
+  const login =
+    document.querySelector('[data-e2e="top-login-button"], a[href*="login"]') ||
+    [...document.querySelectorAll('a, button')].find((b) => /^(log in|se connecter)$/i.test(texte(b)));
+  if (login) return { connecte: false, identite: null };
   return { connecte: false, identite: null };
 }
 
@@ -328,19 +365,25 @@ async function detecterFacebook() {
     }
     return null;
   };
+  const MARQUEURS = 'a[aria-label="Your profile"], a[aria-label*="ton profil" i], a[aria-label*="votre profil" i], a[aria-label*="your profile" i], a[aria-label*="tu perfil" i], a[href="/me/"], div[role="feed"]';
   // SPA : on attend le rendu (formulaire login OU marqueurs de session) avant de trancher.
   await attendre(
     () =>
       document.querySelector('input#email, input[name="email"]') ||
-      document.querySelector('a[aria-label="Your profile"], a[aria-label*="ton profil" i], a[aria-label*="votre profil" i], div[role="feed"]') ||
-      (document.body?.innerText?.length ?? 0) > 500,
+      document.querySelector(MARQUEURS) ||
+      (document.body?.textContent?.length ?? 0) > 500,
     15000,
   );
-  if (document.querySelector('input#email, input[name="email"]')) return { connecte: false, identite: null };
-  // Preuve positive exigée : sans marqueur de session, on considère non connecté.
-  const marqueur = document.querySelector('a[aria-label="Your profile"], a[aria-label*="ton profil" i], a[aria-label*="votre profil" i], div[role="feed"]');
-  if (!marqueur) return { connecte: false, identite: null };
-  return { connecte: true, identite: null };
+  const corps = document.body?.innerText ?? '';
+  if (document.querySelector('input#email, input[name="email"]') && /log in|se connecter|mot de passe/i.test(corps)) {
+    return { connecte: false, identite: null };
+  }
+  // Cookie c_user (identifiant numérique, lisible en JS) = preuve de session.
+  let sessionCookie = false;
+  try { sessionCookie = /(?:^|;\s*)c_user=\d+/.test(document.cookie ?? ''); } catch { /* cookies indisponibles */ }
+  const marqueur = document.querySelector(MARQUEURS);
+  if (marqueur || sessionCookie) return { connecte: true, identite: null };
+  return { connecte: false, identite: null };
 }
 
 async function detecterYoutube() {
@@ -354,19 +397,32 @@ async function detecterYoutube() {
     return null;
   };
   const corps = () => document.body?.innerText ?? '';
-  // On attend le rendu (avatar OU écran de connexion) avant de trancher.
+  const texte = (el) => ((el.innerText ?? el.textContent) ?? '').trim();
+  const AVATAR = '#avatar-btn button, button#avatar-btn, ytd-topbar-menu-button-renderer button';
+  // On attend le rendu (avatar OU écran de connexion OU mur consentement) avant de trancher.
   await attendre(
     () =>
-      document.querySelector('#avatar-btn button, button#avatar-btn') ||
-      (document.querySelector('a[href*="ServiceLogin"]') && /sign in|se connecter/i.test(corps())) ||
-      (document.body?.innerText?.length ?? 0) > 500,
+      document.querySelector(AVATAR) ||
+      document.querySelector('a[href*="ServiceLogin"]') ||
+      /avant de continuer|before you continue/i.test(corps()) ||
+      (document.body?.textContent?.length ?? 0) > 500,
     15000,
   );
-  if ((document.body?.innerText?.length ?? 0) < 50) return { connecte: false, identite: null };
+  // Mur consentement Google (UE) : accepter puis attendre le vrai rendu.
+  if (/avant de continuer|before you continue/i.test(corps()) && !document.querySelector(AVATAR)) {
+    try {
+      const accepter = [...document.querySelectorAll('button')].find((b) => /tout accepter|accept all|alle akzeptieren/i.test(texte(b)));
+      if (accepter) {
+        accepter.click();
+        await attendre(() => document.querySelector(AVATAR), 12000);
+      }
+    } catch { /* consentement facultatif */ }
+  }
+  if ((document.body?.textContent?.length ?? 0) < 50) return { connecte: false, identite: null };
   if (document.querySelector('a[href*="ServiceLogin"]') && /sign in|se connecter/i.test(corps())) {
     return { connecte: false, identite: null };
   }
-  const avatar = await attendre(() => document.querySelector('#avatar-btn button, button#avatar-btn'), 5000);
+  const avatar = await attendre(() => document.querySelector(AVATAR), 5000);
   if (!avatar) return { connecte: false, identite: null };
   avatar.click();
   await attendre(() => document.querySelector('ytd-active-account-header-renderer #account-name'), 8000);
@@ -662,7 +718,7 @@ async function agirX(bloquer, avecSignaux) {
 // actions et déclenche les limites). Combo = blocage direct (+ explication).
 // « Pas intéressé » n'existe que sur le suggéré, pas sur un profil : on ne tente
 // pas d'ouvrir le post (risquerait de quitter le profil avant le blocage).
-async function agirInstagram(bloquer) {
+async function agirInstagram(bloquer, _avecSignaux) {
   const attendre = async (test, ms) => {
     const debut = Date.now();
     while (Date.now() - debut < ms) {
@@ -1415,7 +1471,11 @@ $('arreter').onclick = () => {
 };
 $('verifier').onclick = verifierConnexions;
 
-({ etat = {}, yt_comptes: ytComptes = [], yt_etat: ytEtat = {} } = await chrome.storage.local.get(['etat', 'yt_comptes', 'yt_etat']));
+let initEtat = {};
+try {
+  initEtat = await chrome.storage.local.get(['etat', 'yt_comptes', 'yt_etat']);
+} catch { /* stockage indisponible : on part d'un état vide, persisté au prochain lancement */ }
+({ etat = {}, yt_comptes: ytComptes = [], yt_etat: ytEtat = {} } = initEtat);
 if (!Array.isArray(ytComptes)) ytComptes = [];
 ytComptes = ytComptes.filter((c) => c && typeof c.id === 'string').slice(0, YT_MAX_COMPTES);
 if (typeof ytEtat !== 'object' || ytEtat === null) ytEtat = {};
