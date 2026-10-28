@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Blockfacho</title>
+<style>
+  :root { --papier: #f3efe6; --encre: #141414; --gris: #5c5a55; }
+  body { background: var(--papier); color: var(--encre); font: 15px/1.5 Georgia, "Times New Roman", serif; max-width: 760px; margin: 32px auto; padding: 0 16px; }
+  h1 { font: 700 32px/1 "Arial Black", "Helvetica Neue", Arial, sans-serif; text-transform: uppercase; letter-spacing: -1px; margin: 0 0 8px; padding-bottom: 12px; border-bottom: 5px solid var(--encre); }
+  .sous { color: var(--gris); margin: 0 0 24px; }
+  fieldset { border: 2px solid var(--encre); padding: 10px 16px 12px; margin: 0 0 16px; }
+  legend { font: 700 12px ui-monospace, "DejaVu Sans Mono", monospace; text-transform: uppercase; letter-spacing: 2px; padding: 0 6px; }
+  label { display: inline-flex; gap: 6px; align-items: center; margin: 4px 16px 4px 0; }
+  input[type=number] { width: 64px; background: #fff; color: var(--encre); border: 2px solid var(--encre); padding: 2px 6px; font: inherit; }
+  input[type=checkbox] { accent-color: var(--encre); }
+  button { background: var(--papier); color: var(--encre); border: 3px solid var(--encre); padding: 9px 18px; font: 700 13px ui-monospace, "DejaVu Sans Mono", monospace; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; margin-right: 8px; }
+  button.principal { background: var(--encre); color: var(--papier); }
+  button:disabled { opacity: .35; cursor: default; }
+  .note { color: var(--gris); font-size: 13px; margin: 8px 0 0; }
+  #journal { background: #fff; border: 2px solid var(--encre); padding: 12px; height: 340px; overflow: auto; font: 12px/1.7 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; margin-top: 16px; }
+  .ok { color: #1a6b2f; } .gris { color: var(--gris); } .err { color: #b3261e; font-weight: 700; }
+</style>
+</head>
+<body>
+  <h1>Blockfacho</h1>
+  <p class="sous" id="resume">Chargement de l'annuaire…</p>
+
+  <fieldset><legend>Plateformes</legend><div id="plateformes"></div>
+    <p class="note">Connecte-toi au préalable sur chaque réseau dans ce navigateur. Instagram, TikTok et Facebook limitent vite les blocages en rafale : traite-les par petits lots.</p>
+  </fieldset>
+
+  <fieldset><legend>Comptes &amp; connexions</legend>
+    <button id="verifier">Vérifier mes connexions</button>
+    <div id="connexions"><p class="note">Non vérifié : clique pour détecter chaque session avant de lancer.</p></div>
+    <div id="yt-comptes"></div>
+    <p class="note">YouTube multi-comptes : 4 max (le principal + 3). On ne change jamais de compte Google pour toi — change de compte dans YouTube, clique « Vérifier », l'extension suit l'identité détectée avec sa propre progression. Chaque compte garde ses limites : voir README.</p>
+  </fieldset>
+
+  <fieldset><legend>Catégories</legend><div id="categories"></div></fieldset>
+
+  <fieldset><legend>Rythme</legend>
+    <label>Blocages max par lancement <input type="number" id="max" value="40" min="1"></label>
+    <label>Pause entre <input type="number" id="delaiMin" value="8" min="1"> et <input type="number" id="delaiMax" value="20" min="1"> s</label>
+    <label><input type="checkbox" id="aBlanc"> À blanc (vérifie sans bloquer)</label>
+    <label><input type="checkbox" id="combo" checked> Signaux négatifs avant blocage (pas intéressé + muet/masqué, puis blocage)</label>
+    <p class="note">Le combo envoie d'abord un signal « pas intéressé / masquer » sur le dernier post, puis mute/masque, puis bloque — le blocage n'est jamais sauté. YouTube ajoute « désabonner + ne plus recommander + pas intéressé + dislike » avant le blocage final. Aucun signalement automatique : trop risqué pour ton compte.</p>
+  </fieldset>
+
+  <button class="principal" id="lancer" disabled>Lancer</button>
+  <button id="arreter" disabled>Arrêter</button>
+
+  <div id="journal"></div>
+  <script type="module" src="panneau.js"></script>
+</body>
+</html>
